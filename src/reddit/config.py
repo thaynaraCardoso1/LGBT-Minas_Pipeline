@@ -30,13 +30,13 @@ def carregar_lista(caminho_arquivo):
 def carregar_config_reddit():
     termos_lgbt   = carregar_lista(TERMOS_LGBT_PATH)
     termos_odio   = carregar_lista(TERMOS_ODIO_PATH)
-  #  cidades_mg    = carregar_lista(CIDADES_MG_PATH)
+    cidades_mg    = carregar_lista(CIDADES_MG_PATH)
     subreddits_br = carregar_lista(SUBREDDITS_BR_PATH)
 
     return {
         "termos_lgbt": termos_lgbt,
         "termos_odio": termos_odio,
-   #     "cidades_mg": cidades_mg,
+        "cidades_mg": cidades_mg,
         "subreddits_br": subreddits_br,
     }
 

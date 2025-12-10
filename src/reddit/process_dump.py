@@ -6,9 +6,11 @@ import zstandard as zstd
 
 from .config import RAW_DIR, PROCESSED_DIR, carregar_config_reddit
 from src.utils.logger import setup_logger
+from src.reddit.filters import texto_casa_mg_lgbt
 
 
-ARQUIVO_ZST = "RS_2025-05_submissions.zst"
+ARQUIVO_ZST = "RC_2025-05_comments.zst"
+#ARQUIVO_ZST = "RC_2025-05_submissions.zst"
 CSV_SAIDA   = ARQUIVO_ZST.replace(".zst", "_BR.csv")
 
 
@@ -59,9 +61,15 @@ def main():
     logger.info("==== INÍCIO DO PROCESSAMENTO ====")
 
     cfg = carregar_config_reddit()
+    termos_lgbt   = cfg["termos_lgbt"]
+    termos_odio   = cfg["termos_odio"]
+    cidades_mg    = cfg["cidades_mg"]
     subreddits_br = cfg["subreddits_br"]
 
-    logger.info(f"🔍 Subreddits BR aceitos: {subreddits_br}")
+    logger.info(f"🌈 Termos LGBT carregados: {termos_lgbt}")
+    logger.info(f"💢 Termos de ódio carregados: {termos_odio}")
+    logger.info(f"🏙️ Cidades MG carregadas: {cidades_mg}")
+    logger.info(f"🇧🇷 Subreddits BR carregados: {subreddits_br}")
 
     caminho_zst = os.path.join(RAW_DIR, ARQUIVO_ZST)
     caminho_csv = os.path.join(PROCESSED_DIR, CSV_SAIDA)
@@ -83,6 +91,13 @@ def main():
             subreddit = (obj.get("subreddit") or "").lower()
             texto = extract_text(obj)
 
+            ok, matched_termos, matched_cidades = texto_casa_mg_lgbt(
+            texto,
+            termos_lgbt,
+            termos_odio,
+            cidades_mg
+        )
+
             # ⭐⭐ FILTRO ÚNICO: SUBREDDIT BR ⭐⭐
             if subreddit not in subreddits_br:
                 continue
@@ -94,6 +109,8 @@ def main():
                 logger.info(f"\n📝 Exemplo {encontrados}:")
                 logger.info(f"Subreddit: {subreddit}")
                 logger.info(f"Texto    : {texto[:400].replace(chr(10),' ')}")
+                logger.info(f"→ Termos encontrados: {matched_termos}")
+                logger.info(f"→ Cidades encontradas: {matched_cidades}")
 
             writer.writerow({
                 "id": obj.get("id"),
