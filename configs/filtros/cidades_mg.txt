@@ -11,7 +11,5 @@ sete lagoas
 governador valadares
 ipatinga
 divinópolis
-divinopolis
 poços de caldas
-pocos de caldas
 patos de minas

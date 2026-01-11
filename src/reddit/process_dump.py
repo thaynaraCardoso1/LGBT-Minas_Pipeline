@@ -7,10 +7,10 @@ import zstandard as zstd
 from .config import RAW_DIR, PROCESSED_DIR, carregar_config_reddit
 from src.utils.logger import setup_logger
 from src.reddit.filters import texto_casa_mg_lgbt
+from src.utils.limpeza import limpar_texto   # 👈 NOVO IMPORT
 
 
-ARQUIVO_ZST = "RC_2025-05_comments.zst"
-#ARQUIVO_ZST = "RC_2025-05_submissions.zst"
+ARQUIVO_ZST = "RC_2025-04.zst"
 CSV_SAIDA   = ARQUIVO_ZST.replace(".zst", "_BR.csv")
 
 
@@ -66,11 +66,6 @@ def main():
     cidades_mg    = cfg["cidades_mg"]
     subreddits_br = cfg["subreddits_br"]
 
-    logger.info(f"🌈 Termos LGBT carregados: {termos_lgbt}")
-    logger.info(f"💢 Termos de ódio carregados: {termos_odio}")
-    logger.info(f"🏙️ Cidades MG carregadas: {cidades_mg}")
-    logger.info(f"🇧🇷 Subreddits BR carregados: {subreddits_br}")
-
     caminho_zst = os.path.join(RAW_DIR, ARQUIVO_ZST)
     caminho_csv = os.path.join(PROCESSED_DIR, CSV_SAIDA)
     os.makedirs(PROCESSED_DIR, exist_ok=True)
@@ -78,7 +73,18 @@ def main():
     logger.info(f"📂 Lendo arquivo: {caminho_zst}")
     logger.info(f"💾 Salvando saída em: {caminho_csv}")
 
-    campos = ["id", "author", "created_utc", "subreddit", "text"]
+    # 👇 NOVOS CAMPOS
+    campos = [
+        "id",
+        "author",
+        "created_utc",
+        "subreddit",
+        "text_original",
+        "text_clean",
+        "has_lgbt_term",
+        "has_hate_term",
+        "has_mg_city",
+    ]
 
     encontrados = 0
 
@@ -89,42 +95,40 @@ def main():
         for obj in iter_zst(caminho_zst, logger):
 
             subreddit = (obj.get("subreddit") or "").lower()
-            texto = extract_text(obj)
 
-            ok, matched_termos, matched_cidades = texto_casa_mg_lgbt(
-            texto,
-            termos_lgbt,
-            termos_odio,
-            cidades_mg
-        )
-
-            # ⭐⭐ FILTRO ÚNICO: SUBREDDIT BR ⭐⭐
+            # ⭐ FILTRO 1: subreddit BR
             if subreddit not in subreddits_br:
                 continue
 
-            encontrados += 1
+            texto_original = extract_text(obj)
+            texto_limpo = limpar_texto(texto_original)
 
-            # Log de exemplo
-            if encontrados <= 5:
-                logger.info(f"\n📝 Exemplo {encontrados}:")
-                logger.info(f"Subreddit: {subreddit}")
-                logger.info(f"Texto    : {texto[:400].replace(chr(10),' ')}")
-                logger.info(f"→ Termos encontrados: {matched_termos}")
-                logger.info(f"→ Cidades encontradas: {matched_cidades}")
+            ok, matched_termos, matched_cidades = texto_casa_mg_lgbt(
+                texto_limpo,
+                termos_lgbt,
+                termos_odio,
+                cidades_mg
+            )
+
+            encontrados += 1
 
             writer.writerow({
                 "id": obj.get("id"),
                 "author": obj.get("author"),
                 "created_utc": obj.get("created_utc"),
                 "subreddit": obj.get("subreddit"),
-                "text": texto,
+                "text_original": texto_original,
+                "text_clean": texto_limpo,
+                "has_lgbt_term": int(any(t in matched_termos for t in termos_lgbt)),
+                "has_hate_term": int(any(t in matched_termos for t in termos_odio)),
+                "has_mg_city": int(bool(matched_cidades)),
             })
 
             if encontrados % 1000 == 0:
-                logger.info(f"{encontrados} posts BR encontrados...")
+                logger.info(f"{encontrados} posts BR processados...")
 
     fim = time.time()
-    logger.info(f"🎉 Total BR encontrados: {encontrados}")
+    logger.info(f"🎉 Total processado: {encontrados}")
     logger.info(f"⏱ Tempo total: {fim - inicio:.2f}s")
     logger.info("==== FIM DO PROCESSAMENTO ====")
 
