@@ -1,0 +1,5 @@
+mkdir -p "bases"
+cat > bases/README.md << 'EOF'
+Esta pasta armazena bases locais (dumps de Reddit, Mastodon, etc.).
+Os arquivos grandes (.zst, .csv, etc.) NÃO são versionados no Git.
+EOF

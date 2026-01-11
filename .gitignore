@@ -9,10 +9,6 @@ __pycache__/
 venv/
 env/
 
-# === Dados grandes (não versionar) ===
-bases/**
-!bases/README.md
-
 logs/**
 
 # === Modelos de linguagem ===
