@@ -22,3 +22,6 @@ src/utils/lang/lid.176.bin
 
 # === Jupyter Notebooks checkpoints ===
 .ipynb_checkpoints/
+
+bases/
+tmp/
