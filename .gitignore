@@ -25,3 +25,8 @@ src/utils/lang/lid.176.bin
 
 bases/
 tmp/
+
+# local outputs/logs
+output_*.log
+*.log
+logs/
