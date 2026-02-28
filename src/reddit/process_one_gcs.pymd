@@ -1,0 +1,338 @@
+import csv
+import io
+import json
+import logging
+
+import zstandard as zstd
+from google.cloud import storage
+
+from src.utils.logger import setup_logger
+from src.reddit.filters import texto_casa_mg_lgbt
+from src.utils.limpeza import limpar_texto
+from src.reddit.config import carregar_config_reddit
+
+
+BUCKET = "lgbtminas-dados"
+RAW_BLOB = "rede social/raw/RC_2025-02.zst"
+OUT_BLOB = "rede social/processed/RC_2025-02_BR.csv"
+
+
+def extract_text(obj):
+    if "body" in obj:
+        return obj.get("body", "")
+    return (obj.get("title", "") or "") + " " + (obj.get("selftext", "") or "")
+
+
+def iter_zst_lines_from_gcs(blob, logger, filename):
+    # Abre o .zst do GCS em stream (não baixa o arquivo inteiro)
+    with blob.open("rb") as raw_f:
+        dctx = zstd.ZstdDecompressor()
+        with dctx.stream_reader(raw_f) as reader:
+            # Converte bytes -> texto e itera linha a linha
+            text_stream = io.TextIOWrapper(reader, encoding="utf-8", errors="ignore")
+            for i, line in enumerate(text_stream, start=1):
+                if i % 1_000_000 == 0:
+                    logger.info(f"[{filename}] 📖 Lendo: {i:,} linhas...")
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line), i
+                except Exception:
+                    continue
+
+
+def main():
+    logger = setup_logger("logs/reddit_process_one_gcs.log")
+    for handler in logger.handlers:
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s - %(levelname)s - %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+
+    logger.info("==== INÍCIO (GCS) - PROCESSAR SOMENTE RC_2025-02 ====")
+
+    cfg = carregar_config_reddit()
+    subreddits_br = set(cfg["subreddits_br"])
+
+    client = storage.Client()
+    bucket = client.bucket(BUCKET)
+
+    raw_blob = bucket.blob(RAW_BLOB)
+    out_blob = bucket.blob(OUT_BLOB)
+
+    # Sanidade: magic bytes do zstd = 28 b5 2f fd
+    head = raw_blob.download_as_bytes(start=0, end=3)
+    if head != b"\x28\xb5\x2f\xfd":
+        raise RuntimeError(f"Arquivo não parece ZSTD válido (header={head!r}).")
+
+    campos = [
+        "id", "author", "created_utc", "subreddit",
+        "text_original", "text_clean",
+        "has_lgbt_term", "has_hate_term", "has_mg_city"
+    ]
+
+    encontrados = 0
+
+    # Escreve o CSV direto no GCS (stream)
+    with out_blob.open("w") as gcs_out:
+        writer = csv.DictWriter(gcs_out, fieldnames=campos)
+        writer.writeheader()
+
+        for obj, num_linha in iter_zst_lines_from_gcs(raw_blob, logger, "RC_2025-02.zst"):
+            subreddit = (obj.get("subreddit") or "").lower()
+            if subreddit not in subreddits_br:
+                continue
+
+            texto_original = extract_text(obj)
+            texto_limpo = limpar_texto(texto_original)
+
+            _, m_termos, m_cidades = texto_casa_mg_lgbt(
+                texto_limpo,
+                cfg["termos_lgbt"],
+                cfg["termos_odio"],
+                cfg["cidades_mg"],
+            )
+
+            encontrados += 1
+            writer.writerow({
+                "id": obj.get("id"),
+                "author": obj.get("author"),
+                "created_utc": obj.get("created_utc"),
+                "subreddit": obj.get("subreddit"),
+                "text_original": texto_original,
+                "text_clean": texto_limpo,
+                "has_lgbt_term": int(any(t in m_termos for t in cfg["termos_lgbt"])),
+                "has_hate_term": int(any(t in m_termos for t in cfg["termos_odio"])),
+                "has_mg_city": int(bool(m_cidades)),
+            })
+
+    logger.info(f"✅ Concluído! Total BR: {encontrados}")
+    logger.info(f"📌 Saída no GCS: gs://{BUCKET}/{OUT_BLOB}")
+    logger.info("🏁 FIM")
+
+
+if __name__ == "__main__":
+    main()
+import csv
+import io
+import json
+import logging
+import os
+import subprocess
+import time
+from typing import Iterator, Tuple, Optional
+
+import zstandard as zstd
+from google.cloud import storage
+
+from src.utils.logger import setup_logger
+from src.reddit.filters import texto_casa_mg_lgbt
+from src.utils.limpeza import limpar_texto
+from src.reddit.config import carregar_config_reddit
+
+
+BUCKET_NAME = "lgbtminas-dados"
+RAW_BLOB = "rede social/raw/RC_2025-02.zst"
+
+# onde salvar o resultado no bucket
+OUT_BLOB = "rede social/processed/RC_2025-02_BR.csv"
+# checkpoint no bucket (pra retomar)
+CKPT_BLOB = "rede social/tmp/RC_2025-02_checkpoint.txt"
+
+
+def extract_text(obj: dict) -> str:
+    if "body" in obj:
+        return obj.get("body", "") or ""
+    return f"{obj.get('title','') or ''} {obj.get('selftext','') or ''}".strip()
+
+
+def load_checkpoint_local(path: str) -> int:
+    if not os.path.exists(path):
+        return 0
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return int((f.read() or "0").strip())
+    except Exception:
+        return 0
+
+
+def save_checkpoint_local(path: str, value: int) -> None:
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(str(value))
+    os.replace(tmp, path)
+
+
+def upload_checkpoint(bucket: storage.Bucket, ckpt_blob_name: str, value: int, logger: logging.Logger) -> None:
+    # grava um textinho no bucket (simples e robusto)
+    blob = bucket.blob(ckpt_blob_name)
+    blob.upload_from_string(str(value), content_type="text/plain")
+    logger.info(f"☁️ Checkpoint enviado ao GCS: {ckpt_blob_name} = {value:,}")
+
+
+def iter_json_lines_from_zst_gcs(
+    blob: storage.Blob,
+    skip_to: int,
+    logger: Optional[logging.Logger],
+    filename: str
+) -> Iterator[Tuple[dict, int]]:
+    """
+    Lê o .zst do GCS em streaming e devolve (obj, numero_linha).
+    """
+    dctx = zstd.ZstdDecompressor()
+
+    # Blob.open("rb") dá um stream HTTP. Usamos stream_reader do zstd em cima disso.
+    with blob.open("rb") as gcs_in:
+        with dctx.stream_reader(gcs_in) as reader:
+            buffer = ""
+            total_lidas = 0
+
+            while True:
+                chunk = reader.read(2**20)  # 1MB
+                if not chunk:
+                    break
+
+                text = chunk.decode("utf-8", errors="ignore")
+                buffer += text
+                linhas = buffer.split("\n")
+                buffer = linhas[-1]
+
+                for linha in linhas[:-1]:
+                    total_lidas += 1
+
+                    if total_lidas <= skip_to:
+                        if logger and total_lidas % 2_000_000 == 0:
+                            logger.info(f"[{filename}] ⏭️ Pulando: {total_lidas:,} linhas...")
+                        continue
+
+                    if logger and total_lidas % 1_000_000 == 0:
+                        logger.info(f"[{filename}] 📖 Lendo: {total_lidas:,} linhas...")
+
+                    linha = linha.strip()
+                    if not linha:
+                        continue
+
+                    try:
+                        yield json.loads(linha), total_lidas
+                    except Exception:
+                        continue
+
+
+def gsutil_cp(local_path: str, gcs_uri: str, logger: logging.Logger) -> None:
+    cmd = ["gsutil", "-q", "cp", local_path, gcs_uri]
+    logger.info(f"☁️ Upload via gsutil: {' '.join(cmd)}")
+    subprocess.check_call(cmd)
+
+
+def main():
+    logger = setup_logger("logs/reddit_process_one_gcs.log")
+    for handler in logger.handlers:
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s - %(levelname)s - %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+
+    logger.info("==== INÍCIO (GCS->LOCAL->GCS) - PROCESSAR SOMENTE RC_2025-02 ====")
+
+    cfg = carregar_config_reddit()
+    subreddits_br = set([s.strip().lower() for s in cfg["subreddits_br"]])
+
+    client = storage.Client()
+    bucket = client.bucket(BUCKET_NAME)
+
+    raw_blob = bucket.blob(RAW_BLOB)
+    filename = os.path.basename(RAW_BLOB)
+
+    # checkpoint local e no bucket
+    ckpt_local = "/tmp/RC_2025-02_checkpoint.txt"
+    skip_to = load_checkpoint_local(ckpt_local)
+
+    if skip_to > 0:
+        logger.info(f"[{filename}] ⚠️ Retomando da linha {skip_to:,}")
+    else:
+        logger.info(f"[{filename}] 🆕 Iniciando novo arquivo")
+
+    # output local
+    out_local = "/tmp/RC_2025-02_BR.csv"
+    mode = "a" if os.path.exists(out_local) and skip_to > 0 else "w"
+
+    campos = [
+        "id", "author", "created_utc", "subreddit",
+        "text_original", "text_clean",
+        "has_lgbt_term", "has_hate_term", "has_mg_city"
+    ]
+
+    encontrados = 0
+    wrote_header = False
+
+    with open(out_local, mode, newline="", encoding="utf-8") as f_out:
+        writer = csv.DictWriter(f_out, fieldnames=campos)
+
+        if mode == "w":
+            writer.writeheader()
+            wrote_header = True
+
+        for obj, num_linha in iter_json_lines_from_zst_gcs(raw_blob, skip_to, logger, filename):
+            subreddit = (obj.get("subreddit") or "").lower()
+
+            if subreddit in subreddits_br:
+                texto_original = extract_text(obj)
+                texto_limpo = limpar_texto(texto_original)
+
+                _, m_termos, m_cidades = texto_casa_mg_lgbt(
+                    texto_limpo,
+                    cfg["termos_lgbt"],
+                    cfg["termos_odio"],
+                    cfg["cidades_mg"],
+                )
+
+                writer.writerow({
+                    "id": obj.get("id"),
+                    "author": obj.get("author"),
+                    "created_utc": obj.get("created_utc"),
+                    "subreddit": obj.get("subreddit"),
+                    "text_original": texto_original,
+                    "text_clean": texto_limpo,
+                    "has_lgbt_term": int(any(t in m_termos for t in cfg["termos_lgbt"])),
+                    "has_hate_term": int(any(t in m_termos for t in cfg["termos_odio"])),
+                    "has_mg_city": int(bool(m_cidades)),
+                })
+                encontrados += 1
+
+            # checkpoint a cada 100k linhas
+            if num_linha % 100_000 == 0:
+                save_checkpoint_local(ckpt_local, num_linha)
+
+                # tenta subir o checkpoint pro bucket também (barato e ajuda muito)
+                try:
+                    upload_checkpoint(bucket, CKPT_BLOB, num_linha, logger)
+                except Exception as e:
+                    logger.warning(f"⚠️ Falha ao enviar checkpoint ao GCS: {e}")
+
+                # flush pra garantir escrita
+                f_out.flush()
+
+    logger.info(f"[{filename}] ✅ Processamento local concluído. Total BR: {encontrados:,}")
+
+    # upload final do CSV pro bucket
+    gsutil_cp(out_local, f"gs://{BUCKET_NAME}/{OUT_BLOB}", logger)
+
+    # remove checkpoint (local e no bucket)
+    try:
+        if os.path.exists(ckpt_local):
+            os.remove(ckpt_local)
+        bucket.blob(CKPT_BLOB).delete()
+        logger.info("🧹 Checkpoint removido (local e GCS).")
+    except Exception as e:
+        logger.warning(f"⚠️ Não consegui remover checkpoint: {e}")
+
+    logger.info("🏁 FIM.")
+
+
+if __name__ == "__main__":
+    main()

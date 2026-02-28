@@ -47,9 +47,11 @@ def _delete_blob_if_exists(client: storage.Client, bucket: str, blob_path: str, 
         b.delete()
         logger.info(f"🧹 Removido no GCS: {blob_path}")
 
-
 def iter_zst_stream(reader, skip_to: int, logger, filename: str) -> Iterator[Tuple[dict, int]]:
-    dctx = zstd.ZstdDecompressor()
+    # Permite janela maior pra alguns .zst (evita "Frame requires too much memory...")
+    ZSTD_MAX_WINDOW = int(os.getenv("ZSTD_MAX_WINDOW", str(2**31)))  # 2GB
+    dctx = zstd.ZstdDecompressor(max_window_size=ZSTD_MAX_WINDOW)
+
     with dctx.stream_reader(reader) as zr:
         buffer = ""
         total_lidas = 0
@@ -81,9 +83,8 @@ def iter_zst_stream(reader, skip_to: int, logger, filename: str) -> Iterator[Tup
 
                 try:
                     yield json.loads(linha), total_lidas
-                except:
+                except Exception:
                     continue
-
 
 def _is_valid_zst_magic(client: storage.Client, bucket: str, blob_path: str) -> bool:
     b = client.bucket(bucket).blob(blob_path)
@@ -145,36 +146,39 @@ def process_file_gcs(
         writer = csv.DictWriter(f_out, fieldnames=campos)
         if mode == "w":
             writer.writeheader()
+    	try:
+	        for obj, num_linha in iter_zst_stream(gcs_in, skip_to=skip_to, logger=logger, filename=filename):
+	            subreddit = (obj.get("subreddit") or "").lower()
 
-        for obj, num_linha in iter_zst_stream(gcs_in, skip_to=skip_to, logger=logger, filename=filename):
-            subreddit = (obj.get("subreddit") or "").lower()
+	            if subreddit in subreddits_br:
+	                texto_original = extract_text(obj)
+	                texto_limpo = limpar_texto(texto_original)
 
-            if subreddit in subreddits_br:
-                texto_original = extract_text(obj)
-                texto_limpo = limpar_texto(texto_original)
+	                _, m_termos, m_cidades = texto_casa_mg_lgbt(
+	                    texto_limpo,
+	                    cfg["termos_lgbt"],
+	                    cfg["termos_odio"],
+	                    cfg["cidades_mg"],
+	                )
 
-                _, m_termos, m_cidades = texto_casa_mg_lgbt(
-                    texto_limpo,
-                    cfg["termos_lgbt"],
-                    cfg["termos_odio"],
-                    cfg["cidades_mg"],
-                )
+	                encontrados += 1
+	                writer.writerow({
+	                    "id": obj.get("id"),
+	                    "author": obj.get("author"),
+	                    "created_utc": obj.get("created_utc"),
+	                    "subreddit": obj.get("subreddit"),
+	                    "text_original": texto_original,
+	                    "text_clean": texto_limpo,
+	                    "has_lgbt_term": int(any(t in m_termos for t in cfg["termos_lgbt"])),
+	                    "has_hate_term": int(any(t in m_termos for t in cfg["termos_odio"])),
+	                    "has_mg_city": int(bool(m_cidades)),
+	                })
 
-                encontrados += 1
-                writer.writerow({
-                    "id": obj.get("id"),
-                    "author": obj.get("author"),
-                    "created_utc": obj.get("created_utc"),
-                    "subreddit": obj.get("subreddit"),
-                    "text_original": texto_original,
-                    "text_clean": texto_limpo,
-                    "has_lgbt_term": int(any(t in m_termos for t in cfg["termos_lgbt"])),
-                    "has_hate_term": int(any(t in m_termos for t in cfg["termos_odio"])),
-                    "has_mg_city": int(bool(m_cidades)),
-                })
-
-            if num_linha % checkpoint_every == 0:
-                _write_checkpoint_gcs(client, bucket_name, checkpoint_blob_path, num_linha, logger)
+	            if num_linha % checkpoint_every == 0:
+	                _write_checkpoint_gcs(client, bucket_name, checkpoint_blob_path, num_linha, logger)
+	    except zstd.ZstdError as e:
+	            logger.error(f"❌ ZstdError ao descompactar {filename}: {e}")
+	            return False
 
     logger.info(f"[{filename}] ✅ Processamento local concluído. Total BR: {encontrados:,}")
 
