@@ -14,14 +14,15 @@ from src.reddit.config import carregar_config_reddit
 from src.reddit.filters import texto_casa_mg_lgbt
 from src.utils.limpeza import limpar_texto
 
-
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"  # 28 b5 2f fd
 
 
-def extract_text(obj):
+def extract_text(obj: dict) -> str:
     if "body" in obj:
-        return obj.get("body", "")
-    return (obj.get("title", "") or "") + " " + (obj.get("selftext", "") or "")
+        return obj.get("body", "") or ""
+    title = obj.get("title", "") or ""
+    selftext = obj.get("selftext", "") or ""
+    return f"{title} {selftext}".strip()
 
 
 def _read_checkpoint_gcs(client: storage.Client, bucket: str, checkpoint_blob_path: str) -> int:
@@ -31,26 +32,40 @@ def _read_checkpoint_gcs(client: storage.Client, bucket: str, checkpoint_blob_pa
     raw = b.download_as_text().strip()
     try:
         return int(raw.replace(",", ""))
-    except:
+    except Exception:
         return 0
 
 
-def _write_checkpoint_gcs(client: storage.Client, bucket: str, checkpoint_blob_path: str, value: int, logger):
+def _write_checkpoint_gcs(
+    client: storage.Client, bucket: str, checkpoint_blob_path: str, value: int, logger: logging.Logger
+) -> None:
     b = client.bucket(bucket).blob(checkpoint_blob_path)
     b.upload_from_string(str(value), content_type="text/plain")
     logger.info(f"☁️ Checkpoint enviado ao GCS: {checkpoint_blob_path} = {value:,}")
 
 
-def _delete_blob_if_exists(client: storage.Client, bucket: str, blob_path: str, logger):
+def _delete_blob_if_exists(client: storage.Client, bucket: str, blob_path: str, logger: logging.Logger) -> None:
     b = client.bucket(bucket).blob(blob_path)
     if b.exists(client):
         b.delete()
         logger.info(f"🧹 Removido no GCS: {blob_path}")
 
-def iter_zst_stream(reader, skip_to: int, logger, filename: str) -> Iterator[Tuple[dict, int]]:
-    # Permite janela maior pra alguns .zst (evita "Frame requires too much memory...")
-    ZSTD_MAX_WINDOW = int(os.getenv("ZSTD_MAX_WINDOW", str(2**31)))  # 2GB
-    dctx = zstd.ZstdDecompressor(max_window_size=ZSTD_MAX_WINDOW)
+
+def _is_valid_zst_magic(client: storage.Client, bucket: str, blob_path: str) -> bool:
+    b = client.bucket(bucket).blob(blob_path)
+    # baixa só os 4 primeiros bytes
+    head = b.download_as_bytes(start=0, end=3)
+    return head == ZSTD_MAGIC
+
+
+def iter_zst_stream(reader, skip_to: int, logger: logging.Logger, filename: str) -> Iterator[Tuple[dict, int]]:
+    """
+    Lê um .zst JSONL em stream, emitindo (obj, num_linha).
+    skip_to: pula as primeiras N linhas (checkpoint).
+    """
+    # Permite janela maior pra alguns .zst (evita "Frame requires too much memory for decoding")
+    zstd_max_window = int(os.getenv("ZSTD_MAX_WINDOW", str(2**31)))  # ~2GB default
+    dctx = zstd.ZstdDecompressor(max_window_size=zstd_max_window)
 
     with dctx.stream_reader(reader) as zr:
         buffer = ""
@@ -84,13 +99,8 @@ def iter_zst_stream(reader, skip_to: int, logger, filename: str) -> Iterator[Tup
                 try:
                     yield json.loads(linha), total_lidas
                 except Exception:
+                    # linha ruim / incompleta / json quebrado -> ignora
                     continue
-
-def _is_valid_zst_magic(client: storage.Client, bucket: str, blob_path: str) -> bool:
-    b = client.bucket(bucket).blob(blob_path)
-    # baixa só os 4 primeiros bytes
-    head = b.download_as_bytes(start=0, end=3)
-    return head == ZSTD_MAGIC
 
 
 def process_file_gcs(
@@ -101,6 +111,16 @@ def process_file_gcs(
     logger: Optional[logging.Logger] = None,
     checkpoint_every: int = 100_000,
 ) -> bool:
+    """
+    Processa 1 arquivo .zst (JSONL) do GCS:
+      - lê em stream
+      - filtra por subreddits_br
+      - escreve CSV local /tmp
+      - faz upload para processed/ via gsutil
+      - checkpoint em tmp/ no GCS pra retomar
+
+    Retorna True se finalizou e subiu o CSV; False se falhou (ou arquivo inválido).
+    """
     logger = logger or setup_logger("logs/process_one_gcs.log")
 
     client = storage.Client()
@@ -121,7 +141,7 @@ def process_file_gcs(
         return False
 
     cfg = carregar_config_reddit()
-    subreddits_br = set(cfg["subreddits_br"])
+    subreddits_br = set((cfg.get("subreddits_br") or []))
 
     skip_to = _read_checkpoint_gcs(client, bucket_name, checkpoint_blob_path)
     if skip_to:
@@ -130,9 +150,15 @@ def process_file_gcs(
         logger.info(f"[{filename}] 🆕 Iniciando do zero")
 
     campos = [
-        "id", "author", "created_utc", "subreddit",
-        "text_original", "text_clean",
-        "has_lgbt_term", "has_hate_term", "has_mg_city"
+        "id",
+        "author",
+        "created_utc",
+        "subreddit",
+        "text_original",
+        "text_clean",
+        "has_lgbt_term",
+        "has_hate_term",
+        "has_mg_city",
     ]
 
     encontrados = 0
@@ -140,45 +166,58 @@ def process_file_gcs(
     # grava local em /tmp e depois sobe via gsutil (mais estável que writer direto no GCS)
     tmp_out = os.path.join(tempfile.gettempdir(), filename.replace(".zst", "_BR.csv"))
 
+    # se existe checkpoint, mas o tmp local não existe, a gente recomeça do zero
+    # (porque não tem como continuar no mesmo CSV local)
+    if skip_to > 0 and not os.path.exists(tmp_out):
+        logger.warning(f"[{filename}] ⚠️ Há checkpoint ({skip_to:,}), mas não achei {tmp_out}. Recomeçando do zero.")
+        skip_to = 0
+
     mode = "a" if (skip_to > 0 and os.path.exists(tmp_out)) else "w"
 
-    with raw_blob.open("rb") as gcs_in, open(tmp_out, mode, newline="", encoding="utf-8") as f_out:
-        writer = csv.DictWriter(f_out, fieldnames=campos)
-        if mode == "w":
-            writer.writeheader()
-    	try:
-	        for obj, num_linha in iter_zst_stream(gcs_in, skip_to=skip_to, logger=logger, filename=filename):
-	            subreddit = (obj.get("subreddit") or "").lower()
+    try:
+        with raw_blob.open("rb") as gcs_in, open(tmp_out, mode, newline="", encoding="utf-8") as f_out:
+            writer = csv.DictWriter(f_out, fieldnames=campos)
+            if mode == "w":
+                writer.writeheader()
 
-	            if subreddit in subreddits_br:
-	                texto_original = extract_text(obj)
-	                texto_limpo = limpar_texto(texto_original)
+            for obj, num_linha in iter_zst_stream(gcs_in, skip_to=skip_to, logger=logger, filename=filename):
+                subreddit = (obj.get("subreddit") or "").lower()
 
-	                _, m_termos, m_cidades = texto_casa_mg_lgbt(
-	                    texto_limpo,
-	                    cfg["termos_lgbt"],
-	                    cfg["termos_odio"],
-	                    cfg["cidades_mg"],
-	                )
+                if subreddit in subreddits_br:
+                    texto_original = extract_text(obj)
+                    texto_limpo = limpar_texto(texto_original)
 
-	                encontrados += 1
-	                writer.writerow({
-	                    "id": obj.get("id"),
-	                    "author": obj.get("author"),
-	                    "created_utc": obj.get("created_utc"),
-	                    "subreddit": obj.get("subreddit"),
-	                    "text_original": texto_original,
-	                    "text_clean": texto_limpo,
-	                    "has_lgbt_term": int(any(t in m_termos for t in cfg["termos_lgbt"])),
-	                    "has_hate_term": int(any(t in m_termos for t in cfg["termos_odio"])),
-	                    "has_mg_city": int(bool(m_cidades)),
-	                })
+                    _, m_termos, m_cidades = texto_casa_mg_lgbt(
+                        texto_limpo,
+                        cfg["termos_lgbt"],
+                        cfg["termos_odio"],
+                        cfg["cidades_mg"],
+                    )
 
-	            if num_linha % checkpoint_every == 0:
-	                _write_checkpoint_gcs(client, bucket_name, checkpoint_blob_path, num_linha, logger)
-	    except zstd.ZstdError as e:
-	            logger.error(f"❌ ZstdError ao descompactar {filename}: {e}")
-	            return False
+                    encontrados += 1
+                    writer.writerow(
+                        {
+                            "id": obj.get("id"),
+                            "author": obj.get("author"),
+                            "created_utc": obj.get("created_utc"),
+                            "subreddit": obj.get("subreddit"),
+                            "text_original": texto_original,
+                            "text_clean": texto_limpo,
+                            "has_lgbt_term": int(any(t in m_termos for t in cfg["termos_lgbt"])),
+                            "has_hate_term": int(any(t in m_termos for t in cfg["termos_odio"])),
+                            "has_mg_city": int(bool(m_cidades)),
+                        }
+                    )
+
+                if num_linha % checkpoint_every == 0:
+                    _write_checkpoint_gcs(client, bucket_name, checkpoint_blob_path, num_linha, logger)
+
+    except zstd.ZstdError as e:
+        logger.error(f"❌ ZstdError ao descompactar {filename}: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Erro inesperado processando {filename}: {e}", exc_info=True)
+        return False
 
     logger.info(f"[{filename}] ✅ Processamento local concluído. Total BR: {encontrados:,}")
 
@@ -190,7 +229,7 @@ def process_file_gcs(
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         logger.error(f"❌ Falha no upload gsutil (code={r.returncode})")
-        logger.error(r.stderr.strip() or r.stdout.strip())
+        logger.error((r.stderr or "").strip() or (r.stdout or "").strip())
         return False
 
     # se subiu, remove checkpoint
@@ -199,7 +238,7 @@ def process_file_gcs(
     return True
 
 
-def main():
+def main() -> None:
     logger = setup_logger("logs/process_one_gcs.log")
     for h in logger.handlers:
         h.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
