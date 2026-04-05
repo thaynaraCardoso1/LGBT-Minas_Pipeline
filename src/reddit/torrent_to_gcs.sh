@@ -40,7 +40,6 @@ echo "======================================"
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
 
-# Dependências
 if ! command -v aria2c >/dev/null 2>&1; then
   echo "📦 Instalando aria2..."
   sudo apt update -y
@@ -52,7 +51,6 @@ if ! command -v gsutil >/dev/null 2>&1; then
   exit 1
 fi
 
-# Fonte do torrent
 TORRENT_FILE=""
 if [[ "$TORRENT_SOURCE" == http*".torrent" ]]; then
   echo "⬇️ Baixando .torrent..."
@@ -61,19 +59,25 @@ if [[ "$TORRENT_SOURCE" == http*".torrent" ]]; then
 elif [[ "$TORRENT_SOURCE" == magnet:* ]]; then
   TORRENT_FILE="$TORRENT_SOURCE"
 else
-  TORRENT_FILE="$TORRENT_SOURCE"  # caminho local .torrent
+  TORRENT_FILE="$TORRENT_SOURCE"
 fi
 
 echo "🔎 Procurando o arquivo dentro do torrent..."
 
-IDX="$(aria2c -S "$TORRENT_FILE" 2>/dev/null | awk -F'|' -v w="$WANTED_PATH" '
-  $2 ~ w { gsub(/^[ \t]+/, "", $1); print $1; exit }
-')"
+TORRENT_LISTING="$(aria2c -S "$TORRENT_FILE" 2>/dev/null || true)"
+
+IDX="$(printf '%s\n' "$TORRENT_LISTING" \
+  | grep -F "$WANTED_PATH" \
+  | head -n 1 \
+  | cut -d'|' -f1 \
+  | tr -d '[:space:]')"
 
 if [[ -z "${IDX}" ]]; then
   echo "❌ Não achei '$WANTED_PATH' na lista do torrent."
-  echo "👉 Arquivos disponíveis:"
-  aria2c -S "$TORRENT_FILE"
+  echo "👉 Algumas linhas da listagem:"
+  printf '%s\n' "$TORRENT_LISTING" | head -n 40
+  echo "👉 Linhas parecidas:"
+  printf '%s\n' "$TORRENT_LISTING" | grep -E 'reddit/comments|comments/RC_|filecomments/RC_|RC_' | head -n 30 || true
   exit 1
 fi
 
@@ -94,7 +98,7 @@ LOCAL_FILE="$(find "$WORKDIR" -type f -name "$(basename "$WANTED_PATH")" | head 
 if [[ -z "${LOCAL_FILE}" ]]; then
   echo "❌ Download terminou, mas não encontrei '$(basename "$WANTED_PATH")' em $WORKDIR"
   echo "📂 Arquivos encontrados:"
-  find "$WORKDIR" -maxdepth 5 -type f -print
+  find "$WORKDIR" -maxdepth 6 -type f -print
   exit 1
 fi
 
@@ -105,8 +109,8 @@ if gsutil -m cp "$LOCAL_FILE" "$GCS_DEST"; then
   echo "✅ Upload ok."
   echo "🧹 Limpando arquivo local..."
   rm -f "$LOCAL_FILE"
-  # remove resíduos do aria2 e tenta limpar diretório
   find "$WORKDIR" -type f -name "*.aria2" -delete || true
+  find "$WORKDIR" -type d -empty -delete || true
   rmdir "$WORKDIR" 2>/dev/null || true
 else
   echo "❌ Falha no upload. Arquivo mantido localmente:"

@@ -1,32 +1,30 @@
-# === Python cache ===
+.venv/
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
 
-# === Virtualenv ===
-.venv/
-venv/
-env/
-
-logs/**
-
-# === Modelos de linguagem ===
-src/utils/lang/lid.176.bin
-
-# === Arquivos derivados ===
-*.csv
-*.zst
-*.zip
-*.gz
-
-# === Jupyter Notebooks checkpoints ===
-.ipynb_checkpoints/
-
-bases/
-tmp/
-
-# local outputs/logs
-output_*.log
+# logs
 *.log
 logs/
+output.log
+
+# outputs
+saida/
+analysis_local/
+mapa_criminal_cluster.html
+
+# dados pesados
+bases/
+_work_reddit/
+
+# notebooks
+.ipynb_checkpoints/
+
+# env
+.env
+.env.*
+
+# credenciais (mais seguro que *.json)
+*credentials*.json
+*key*.json
+*secret*.json
