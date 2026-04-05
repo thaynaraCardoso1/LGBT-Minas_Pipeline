@@ -1,41 +1,44 @@
-cat > README.md << 'EOF'
-# 🏳️‍🌈 LGBT+ Minas — Coleta e Análise de Discurso de Ódio em Redes Sociais
+# 🏳️‍🌈 LGBT+ Minas — Hate Speech Detection in Social Media
 
-Este projeto implementa um pipeline de **coleta, filtragem, limpeza e análise** de dados provenientes de redes sociais (Mastodon e Reddit) para identificar e caracterizar **discurso de ódio direcionado à comunidade LGBT+** em conteúdos relacionados ao estado de **Minas Gerais (Brasil)**.
+This project implements a complete data pipeline for the **collection, filtering, processing, and analysis** of social media content, aiming to identify and characterize **hate speech targeting the LGBT+ community** in the context of **Minas Gerais (Brazil)**.
 
-A pesquisa integra dados de:
-- 🌐 Redes sociais públicas (Mastodon, Reddit)
-- 📍 Filtros geográficos (cidades de Minas Gerais)
-- 🏳️‍🌈 Termos LGBT+
-- ⚠️ Termos de discurso de ódio
-- 🧠 Identificação automática de idioma (português)
-- 💾 Processamento de dumps massivos Reddit (`.zst`, dezenas de GB)
+The research integrates multiple data sources and processing steps, including:
 
-O projeto faz parte da dissertação de mestrado da autora.
+- 🌐 Public social media platforms (Redit)
+- 📍 Geographic filtering based on cities in Minas Gerais
+- 🏳️‍🌈 LGBT-related terminology detection
+- ⚠️ Hate speech keyword filtering
+- 🧠 Automatic language identification (Portuguese)
+- 💾 Processing of large-scale Reddit dumps (`.zst`, tens of GB)
 
----
-
-## ✨ Objetivos
-
-- Coletar e processar grandes volumes de dados textuais.
-- Detectar menções LGBT+ associadas a discurso de ódio.
-- Restringir análise a conteúdos potencialmente localizáveis em MG.
-- Criar dataset filtrado para análise linguística e modelos de NLP.
-- Estabelecer pipeline reprodutível e documentado.
+This project is part of a Master's dissertation in Computer Science.
 
 ---
 
-## 📂 Estrutura do Projeto
-LGBT+Minas/
+## ✨ Objectives
+
+- Collect and process large-scale textual data from social media.
+- Identify LGBT-related content associated with hate speech.
+- Restrict analysis to geographically relevant content (Minas Gerais).
+- Build a structured dataset for linguistic and NLP-based analysis.
+- Provide a reproducible and well-documented data pipeline.
+
+---
+
+## 📂 Project Structure
+LGBT-Minas-Pipeline/
 │
-├── bases/ # Dados locais (não versionados)
-│ └── rede social/
-│ └── reddit/
-│ ├── raw/ # Dumps (.zst)
-│ ├── processed/ # CSVs gerados
-│ └── tmp/
+├── data/ # Data (not versioned)
+│ ├── social_media/
+│ │ ├── raw/ # Raw dumps (.zst)
+│ │ ├── processed/ # Filtered CSV files
+│ │ └── analysis/
+│ │ ├── vader/ # Sentiment analysis outputs
+│ │ └── tybyria/ # Hate speech detection outputs
+│ │
+│ └── criminal_data/ # Official crime datasets
 │
-├── configs/ # Termos, cidades, parâmetros
+├── configs/ # Filters and parameters
 │ ├── filtros/
 │ │ ├── cidades_mg.txt
 │ │ ├── termos_lgbt.txt
@@ -44,109 +47,66 @@ LGBT+Minas/
 │
 ├── src/
 │ ├── reddit/
-│ │ ├── process_dump.py # Pipeline Reddit
-│ │ ├── filters.py # Filtros MG + LGBT + Ódio
+│ │ ├── process_dump.py # Reddit processing pipeline
+│ │ ├── filters.py # MG + LGBT + hate filters
 │ │ └── config.py
-│ ├── mastodon/ # Scripts de coleta Mastodon
+│ │
+│ ├── mastodon/ # Mastodon data collection scripts
+│ │
 │ └── utils/
-│ ├── lang/ # Detectores de idioma
+│ ├── lang/ # Language detection utilities
 │ ├── logger.py
 │ └── load_config.py
 │
-├── logs/ # Logs de processamento
-└── README.md # (este arquivo)
+├── logs/ # Processing logs
+└── README.md
 
 
 ---
 
-## ⚙️ Dependências
+## ⚙️ Requirements
 
-Instale com:
-
-```bash
+Install dependencies using:
 pip install -r requirements.txt
-```
 
-## Principais bibliotecas:
-```bash
-pandas
-zstandard
-requests
-beautifulsoup4
-langdetect
-```
+Main libraries:
+- pandas
+- zstandard
+- requests
+- beautifulsoup4
+- langdetect
 
-🧵 Como rodar o pipeline Reddit
-1. Coloque os dumps .zst em:
-```bash
-bases/rede social/reddit/raw/
-```
+## 🧵 Running the Reddit Pipeline
+1. Place .zst files in: data/social_media/raw/
+2. Run: python -m src.reddit.process_dump
 
-2. Rode:
-```bash
-python3 -m src.reddit.process_dump
-```
+The pipeline performs:
+Streaming decompression of .zst files
+Language filtering (Portuguese)
+Detection of LGBT terms, hate speech, and MG locations
+Incremental CSV generation
+Detailed logging
 
-O script:
-descompacta o .zst em streaming
-filtra idioma (pt)
-filtra termos LGBT+, ódio e cidades de MG
-salva incrementalmente no CSV
-gera logs detalhados
+## 📊 Data and Code Availability
 
-🚫 Dados não versionados
+The datasets generated and analyzed during this study are available at:
 
-Importante: Nenhum dump, CSV processado ou modelo é enviado ao Git.
-
-Veja .gitignore para mais detalhes.
-
-📜 Licença
-
-Uso acadêmico e educacional.
-
-✍️ Autora
-
-Tata (Thaynara Alexandre Cardoso)
-Mestrado em Informática – UNIRIO
-Arquiteta de Aplicações • Pesquisadora em NLP
-EOF
+The source code is publicly available at:
+👉 https://github.com/thaynaraCardoso1/LGBT-Minas_Pipeline
 
 
----
+## 🚫 Data Versioning Policy
 
-# 🚀 **2) Subir tudo para o GitHub (passo a passo)**
+Large datasets (raw dumps, processed CSVs, and model outputs) are not versioned in this repository.
 
-### 1. Confirme que está no branch correto
+Please refer to the .gitignore file and external storage links for data access.
 
-```bash
-git branch -M main
+## 📜 License
 
-2. Adicione tudo
-git add README.md
-git commit -m "Adiciona README.md do projeto"
+This project is intended for academic and educational use.
 
-3. Crie o repositório no GitHub
+## ✍️ Author
 
-Vá para:
-
-👉 https://github.com/new
-
-Repository name: LGBT-Minas-Pipeline
-
-Description:
-Pipeline de coleta e análise de discurso de ódio LGBT+ em redes sociais com filtros geográficos para Minas Gerais
-
-Public (recomendado)
-
-NÃO crie README pelo GitHub (você já tem um local)
-
-Clique em Create Repository
-
-4. Adicionar o remoto
-
-(Use sua URL real do GitHub)
-
-git remote add origin https://github.com/SEU_USUARIO/LGBT-Minas-Pipeline.git
-
-5. Subir pro GitHub
-git push -u origin main
+Thaynara Alexandre Cardoso
+M.Sc. Candidate in Computer Science – UNIRIO
+Application Architect • NLP Researcher
